@@ -2,7 +2,7 @@
   "name": "ibmi-source-member-checkout",
   "displayName": "IBMi Source Member Checkout",
   "description": "Check out, track, and merge IBM i source members with a safe diff-based workflow. Works with Code for IBM i.",
-  "version": "0.0.1",
+  "version": "1.0.0",
   "publisher": "RickyThompson",
   "license": "GPL-3.0",
   "icon": "images/IBMi Source Member Checkout.png",
