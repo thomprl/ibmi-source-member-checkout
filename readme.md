@@ -1,5 +1,9 @@
 # IBMi Source Member Checkout
 
+<p align="center">
+  <img src="images/IBMi Source Member Checkout.png" alt="IBMi Source Member Checkout logo" width="128">
+</p>
+
 Check out IBM i source members locally, edit them offline, and merge changes back using VS Code's built-in diff editor. Works with [Code for IBM i](https://marketplace.visualstudio.com/items?itemName=HalcyonTechLtd.code-for-ibmi).
 
 ## Why?

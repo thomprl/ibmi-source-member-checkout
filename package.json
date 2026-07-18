@@ -6,6 +6,14 @@
   "publisher": "RickyThompson",
   "license": "GPL-3.0",
   "icon": "images/IBMi Source Member Checkout.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thomprl/ibmi-source-member-checkout.git"
+  },
+  "bugs": {
+    "url": "https://github.com/thomprl/ibmi-source-member-checkout/issues"
+  },
+  "homepage": "https://github.com/thomprl/ibmi-source-member-checkout#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
