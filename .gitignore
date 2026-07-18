@@ -1,0 +1,10 @@
+out/
+node_modules/
+.vscode-test/
+*.vsix
+.claude/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+.env
