@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "publisher": "RickyThompson",
   "license": "GPL-3.0",
-  "icon": "images/IBMi Source Member Checkout.png",
+  "icon": "images/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/thomprl/ibmi-source-member-checkout.git"
