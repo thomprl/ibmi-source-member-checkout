@@ -1,6 +1,6 @@
 # IBMi Source Member Checkout
 
-<p align="center">
+<p>
   <img src="images/IBMi Source Member Checkout.png" alt="IBMi Source Member Checkout logo" width="128">
 </p>
 
