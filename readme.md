@@ -10,6 +10,14 @@ Check out IBM i source members locally, edit them offline, and merge changes bac
 
 Editing source members directly through Code for IBM i saves straight to the IBM i on every keystroke-save. This extension lets you **check out a local copy**, work at your own pace, and **merge changes back** when ready — with full diff support and source date preservation.
 
+
+
+## Settings
+Allow Checkout From Protected Filter - allows you to check out a member from a protect object browser filter
+Auto Open On Checkout - automatically open the downloaded source member when checking out
+Local Folder - what folder to store the checked out member to. (It's recommended to change this to another folder).
+Warn On Redownload - what that the member has already been checked out before overwriting it.
+
 ## Features
 
 ### Check Out Members
