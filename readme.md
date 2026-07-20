@@ -8,9 +8,10 @@ Check out IBM i source members locally, edit them offline, and merge changes bac
 
 ## Why?
 
-Editing source members directly through Code for IBM i saves straight to the IBM i on every keystroke-save. This extension lets you **check out a local copy**, work at your own pace, and **merge changes back** when ready — with full diff support and source date preservation.
+Editing source members directly through Code for IBM i saves straight to the IBM i on every keystroke-save. This extension lets you **check out a local copy**, work at your own pace, and **merge changes back** when ready — with full diff support and source date preservation. This allows AI tools to work with your source files locally.
 
-
+## Important
+I would go into the settings and change the local folder to a different location than the default. The default is in the extension storage. This just makes finding the folder easier to open in the workspace.
 
 ## Settings
 - **Allow Checkout From Protected Filter** - allows you to check out a member from a protect object browser filter
