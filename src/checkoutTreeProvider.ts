@@ -55,37 +55,48 @@ export class CheckoutTreeProvider
 
   getTreeItem(element: TreeItemType): vscode.TreeItem {
     switch (element.kind) {
+      case "library":
+        return this.buildLibraryItem(element.system, element.library);
       case "sourceFile":
-        return this.buildSourceFileItem(element.library, element.sourceFile);
+        return this.buildSourceFileItem(
+          element.system,
+          element.library,
+          element.sourceFile
+        );
       case "member":
         return this.buildMemberItem(element.entry);
     }
   }
 
   getParent(element: TreeItemType): TreeItemType | undefined {
-    if (element.kind !== "member") {
-      return undefined;
-    }
-
     const system = getSystemName();
     if (!system) {
       return undefined;
     }
 
-    return {
-      kind: "sourceFile",
-      system,
-      library: element.entry.library,
-      sourceFile: element.entry.sourceFile,
-    };
+    switch (element.kind) {
+      case "library":
+        return undefined;
+      case "sourceFile":
+        return { kind: "library", system, library: element.library };
+      case "member":
+        return {
+          kind: "sourceFile",
+          system,
+          library: element.entry.library,
+          sourceFile: element.entry.sourceFile,
+        };
+    }
   }
 
   getChildren(element?: TreeItemType): TreeItemType[] {
     if (!element) {
-      return this.getRootChildren();
+      return this.getLibraries();
     }
 
     switch (element.kind) {
+      case "library":
+        return this.getSourceFilesForLibrary(element.system, element.library);
       case "sourceFile":
         return this.getMembersForSourceFile(
           element.system,
@@ -97,42 +108,45 @@ export class CheckoutTreeProvider
     }
   }
 
-  private getRootChildren(): TreeItemType[] {
+  private getVisibleEntries(system: string): CheckedOutMember[] {
+    return this.service
+      .getEntriesForSystem(system)
+      .filter((e) => this.matchesSearch(e));
+  }
+
+  private getLibraries(): TreeItemType[] {
     const system = getSystemName();
     if (!system) {
       return [];
     }
 
-    const entries = this.service
-      .getEntriesForSystem(system)
-      .filter((e) => this.matchesSearch(e));
-    if (entries.length === 0) {
-      return [];
-    }
-
-    const seen = new Set<string>();
-    const result: Extract<TreeItemType, { kind: "sourceFile" }>[] = [];
-
-    for (const entry of entries) {
-      const key = `${entry.library}/${entry.sourceFile}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        result.push({
-          kind: "sourceFile",
-          system,
-          library: entry.library,
-          sourceFile: entry.sourceFile,
-        });
-      }
-    }
-
-    result.sort(
-      (a, b) =>
-        a.library.localeCompare(b.library) ||
-        a.sourceFile.localeCompare(b.sourceFile)
+    const libraries = new Set(
+      this.getVisibleEntries(system).map((e) => e.library)
     );
 
-    return result;
+    return [...libraries]
+      .sort((a, b) => a.localeCompare(b))
+      .map((library) => ({ kind: "library" as const, system, library }));
+  }
+
+  private getSourceFilesForLibrary(
+    system: string,
+    library: string
+  ): TreeItemType[] {
+    const sourceFiles = new Set(
+      this.getVisibleEntries(system)
+        .filter((e) => e.library.toUpperCase() === library.toUpperCase())
+        .map((e) => e.sourceFile)
+    );
+
+    return [...sourceFiles]
+      .sort((a, b) => a.localeCompare(b))
+      .map((sourceFile) => ({
+        kind: "sourceFile" as const,
+        system,
+        library,
+        sourceFile,
+      }));
   }
 
   private getMembersForSourceFile(
@@ -140,29 +154,40 @@ export class CheckoutTreeProvider
     library: string,
     sourceFile: string
   ): TreeItemType[] {
-    return this.service
-      .getEntriesForSystem(system)
+    return this.getVisibleEntries(system)
       .filter(
         (e) =>
           e.library.toUpperCase() === library.toUpperCase() &&
           e.sourceFile.toUpperCase() === sourceFile.toUpperCase()
       )
-      .filter((e) => this.matchesSearch(e))
       .sort((a, b) => a.memberName.localeCompare(b.memberName))
       .map((entry) => ({ kind: "member" as const, entry }));
   }
 
+  private groupCollapsibleState(): vscode.TreeItemCollapsibleState {
+    return this.searchTerm
+      ? vscode.TreeItemCollapsibleState.Expanded
+      : vscode.TreeItemCollapsibleState.Collapsed;
+  }
+
+  private buildLibraryItem(system: string, library: string): vscode.TreeItem {
+    const item = new vscode.TreeItem(library, this.groupCollapsibleState());
+    // Stable ids let VS Code remember each node's expand/collapse state
+    // across refreshes; source file labels alone are no longer unique.
+    item.id = `lib:${system}:${library}`.toUpperCase();
+    item.contextValue = "libraryGroup";
+    item.iconPath = new vscode.ThemeIcon("library");
+    return item;
+  }
+
   private buildSourceFileItem(
+    system: string,
     library: string,
     sourceFile: string
   ): vscode.TreeItem {
-    const collapsibleState = this.searchTerm
-      ? vscode.TreeItemCollapsibleState.Expanded
-      : vscode.TreeItemCollapsibleState.Collapsed;
-    const item = new vscode.TreeItem(
-      `${library}/${sourceFile}`,
-      collapsibleState
-    );
+    const item = new vscode.TreeItem(sourceFile, this.groupCollapsibleState());
+    item.id = `spf:${system}:${library}:${sourceFile}`.toUpperCase();
+    item.tooltip = `${library}/${sourceFile}`;
     item.contextValue = "sourceFileGroup";
     item.iconPath = new vscode.ThemeIcon("folder-library");
     return item;
@@ -174,6 +199,7 @@ export class CheckoutTreeProvider
       label,
       vscode.TreeItemCollapsibleState.None
     );
+    item.id = `mbr:${entry.id}`;
 
     item.description = this.getStatusDescription(entry);
     item.tooltip = this.getTooltip(entry);
@@ -206,6 +232,8 @@ export class CheckoutTreeProvider
         return `conflict detected ${checkedDate}`;
       case "in-sync":
         return `in sync ${checkedDate}`;
+      case "remote-missing":
+        return `remote member does not exist (checked ${checkedDate})`;
     }
   }
 
@@ -214,6 +242,11 @@ export class CheckoutTreeProvider
     md.appendMarkdown(`**${formatMemberPath(entry)}**\n\n`);
     md.appendMarkdown(`- **System:** ${entry.system}\n`);
     md.appendMarkdown(`- **Status:** ${entry.status}\n`);
+    if (entry.status === "remote-missing") {
+      md.appendMarkdown(
+        `- **Warning:** the member no longer exists on the IBM i. Your local copy is the only one left.\n`
+      );
+    }
     md.appendMarkdown(
       `- **Checked out:** ${new Date(entry.checkedOutAt).toLocaleString()}\n`
     );
@@ -252,6 +285,11 @@ export class CheckoutTreeProvider
         return new vscode.ThemeIcon(
           "check-all",
           new vscode.ThemeColor("charts.green")
+        );
+      case "remote-missing":
+        return new vscode.ThemeIcon(
+          "error",
+          new vscode.ThemeColor("errorForeground")
         );
     }
   }

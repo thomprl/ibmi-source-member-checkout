@@ -2,7 +2,7 @@
   "name": "ibmi-source-member-checkout",
   "displayName": "IBMi Source Member Checkout",
   "description": "Check out, track, and merge IBM i source members with a safe diff-based workflow. Works with Code for IBM i.",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "publisher": "RickyThompson",
   "license": "GPL-3.0",
   "icon": "images/icon.png",
@@ -145,10 +145,22 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "ibmi-checkout.recheckout",
+        "title": "Re-checkout from IBM i",
+        "category": "IBM i Checkout",
+        "icon": "$(cloud-download)"
+      },
+      {
         "command": "ibmi-checkout.runAction",
         "title": "Run Action",
         "category": "IBM i Checkout",
         "icon": "$(play)"
+      },
+      {
+        "command": "ibmi-checkout.refreshLibraryRemote",
+        "title": "Refresh Remote Status",
+        "category": "IBM i Checkout",
+        "icon": "$(sync)"
       },
       {
         "command": "ibmi-checkout.refreshSourceFileRemote",
@@ -207,7 +219,9 @@
         { "command": "ibmi-checkout.runAction", "when": "false" },
         { "command": "ibmi-checkout.openRemoteFile", "when": "false" },
         { "command": "ibmi-checkout.uploadToRemote", "when": "false" },
+        { "command": "ibmi-checkout.recheckout", "when": "false" },
         { "command": "ibmi-checkout.refreshAllRemote", "when": "false" },
+        { "command": "ibmi-checkout.refreshLibraryRemote", "when": "false" },
         { "command": "ibmi-checkout.refreshSourceFileRemote", "when": "false" },
         { "command": "ibmi-checkout.expandAll", "when": "false" },
         { "command": "ibmi-checkout.search", "when": "false" },
@@ -260,9 +274,14 @@
           "group": "2_merge@2"
         },
         {
-          "command": "ibmi-checkout.runAction",
+          "command": "ibmi-checkout.recheckout",
           "when": "view == checkoutView && viewItem =~ /^checkout/",
           "group": "2_merge@3"
+        },
+        {
+          "command": "ibmi-checkout.runAction",
+          "when": "view == checkoutView && viewItem =~ /^checkout/",
+          "group": "2_merge@4"
         },
         {
           "command": "ibmi-checkout.selectForCompare",
@@ -288,6 +307,16 @@
           "command": "ibmi-checkout.discardCheckout",
           "when": "view == checkoutView && viewItem =~ /^checkout/",
           "group": "6_danger@1"
+        },
+        {
+          "command": "ibmi-checkout.refreshLibraryRemote",
+          "when": "view == checkoutView && viewItem == libraryGroup",
+          "group": "inline"
+        },
+        {
+          "command": "ibmi-checkout.refreshLibraryRemote",
+          "when": "view == checkoutView && viewItem == libraryGroup",
+          "group": "1_status@1"
         },
         {
           "command": "ibmi-checkout.refreshSourceFileRemote",

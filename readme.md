@@ -27,6 +27,18 @@ Right-click a member in the Code for IBM i Object Browser and choose **Check Out
 
 Select multiple members (Ctrl/Shift-click) before checking out, and they're all downloaded together — if any are already checked out, you're asked once whether to re-download or skip them.
 
+### Checked Out Members Panel
+
+Checkouts are grouped **Library → Source File → Member**. Libraries and source files start collapsed; use **Expand All** in the panel toolbar to open everything, or search by member name to show only the matching members, already expanded.
+
+```
+MYLIB
+  QRPGLESRC
+    PAYROLL.RPGLE
+  QCLSRC
+    PAYROLLC.CLLE
+```
+
 ### Check Out All Members
 
 Right-click a **source file** (one level above members) and choose **Check Out All Members** to pull down every member it contains in one go. Since this can mean a lot of members, a confirmation dialog warns that it may take a while before starting.
@@ -43,6 +55,10 @@ Right-click a checkout and choose **Merge Back to IBM i** to open a diff view �
 
 For a quick full replace, use **Upload to IBM i**. This overwrites the remote member with your local copy. A warning confirms that **source dates will not be preserved**.
 
+### Re-checkout from IBM i
+
+Right-click a checkout and choose **Re-checkout from IBM i** to replace your local copy with a fresh download of the remote member, without having to refresh first. This discards any local changes, so a confirmation dialog is shown before proceeding. Works on a multi-selection.
+
 ### Refresh Remote Status
 
 Compares your local file, the live remote content, and the remote content as it was at checkout time (not just a stale comparison) to classify each checkout:
@@ -50,8 +66,11 @@ Compares your local file, the live remote content, and the remote content as it 
 - **In sync** — local matches remote exactly
 - **Modified** — you've edited locally; remote is unchanged (safe — nothing to lose)
 - **Conflict** — remote changed *and* still differs from local (re-checkout would discard your edits — review with Merge Back first)
+- **Remote member does not exist** — the member was deleted or renamed on the IBM i (shown with a red error icon); your local copy is the only one left
 
-Refresh per member (inline icon or context menu, with a conflict prompt to Merge Back or Re-checkout), per source file group, or for every checkout at once from the panel toolbar.
+Trailing blank lines (including lines that contain only blank padding) are ignored when comparing, so extra blank lines at the end of a member don't make it look out of sync.
+
+Refresh per member (inline icon or context menu, with a conflict prompt to Merge Back or Re-checkout), per source file, per library, or for every checkout at once from the panel toolbar.
 
 ### Compare With
 
@@ -67,7 +86,7 @@ Right-click a checkout for comparison tools: **Select for Compare** (mark one ch
 
 ### Multi-Select
 
-The Checked Out Members panel supports selecting multiple checkouts at once. **Open Local/Remote File, Run Action, Upload to IBM i, Refresh Remote Status,** and **Discard Checkout** all work on a multi-selection, each confirming with a message naming how many members the action will affect before proceeding. Actions that only make sense for one item at a time (Merge Back, Compare With, Copy Member Path, Reveal in File Explorer) are single-selection only.
+The Checked Out Members panel supports selecting multiple checkouts at once. **Open Local/Remote File, Run Action, Upload to IBM i, Re-checkout from IBM i, Refresh Remote Status,** and **Discard Checkout** all work on a multi-selection, each confirming with a message naming how many members the action will affect before proceeding. Actions that only make sense for one item at a time (Merge Back, Compare With, Copy Member Path, Reveal in File Explorer) are single-selection only.
 
 ## Settings
 

@@ -3,7 +3,7 @@ import { CheckoutService } from "./checkoutService";
 import { CheckoutTreeProvider } from "./checkoutTreeProvider";
 import { MergeHandler } from "./mergeHandler";
 import { getInstance, getSystemName, listSourceFileMembers } from "./codeForIBMi";
-import { TreeItemType, formatMemberPath } from "./types";
+import { RefreshTally, TreeItemType, formatMemberPath } from "./types";
 
 let outputChannel: vscode.OutputChannel;
 
@@ -55,6 +55,29 @@ function resolveMemberSelections(
   return selections.filter(
     (s): s is Extract<TreeItemType, { kind: "member" }> => s?.kind === "member"
   );
+}
+
+function showGroupRefreshSummary(
+  groupName: string,
+  { modified, conflict, missing, errors }: RefreshTally
+): void {
+  if (errors > 0 || missing > 0) {
+    vscode.window.showWarningMessage(
+      `${groupName}: ${conflict} conflict(s), ${modified} modified, ${missing} missing on remote, ${errors} error(s).`
+    );
+  } else if (conflict > 0) {
+    vscode.window.showWarningMessage(
+      `${groupName}: ${conflict} member(s) have conflicting remote changes.`
+    );
+  } else if (modified > 0) {
+    vscode.window.showInformationMessage(
+      `${groupName}: ${modified} member(s) have local changes pending merge.`
+    );
+  } else {
+    vscode.window.showInformationMessage(
+      `${groupName}: all members are in sync.`
+    );
+  }
 }
 
 function registerCommands(
@@ -388,6 +411,93 @@ function registerCommands(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
+      "ibmi-checkout.recheckout",
+      async (item: TreeItemType, allSelections?: TreeItemType[]) => {
+        const selections = resolveMemberSelections(item, allSelections);
+        if (selections.length === 0) {
+          return;
+        }
+
+        if (selections.length === 1) {
+          const entry = selections[0].entry;
+          const memberPath = formatMemberPath(entry);
+
+          const confirm = await vscode.window.showWarningMessage(
+            `Re-checkout ${memberPath} from the IBM i? This will overwrite your local copy and discard any local changes.`,
+            { modal: true },
+            "Re-checkout"
+          );
+          if (confirm !== "Re-checkout") {
+            return;
+          }
+
+          try {
+            await service.recheckout(entry);
+            vscode.window.showInformationMessage(
+              `Re-checked out ${memberPath} from IBM i.`
+            );
+          } catch (err: any) {
+            vscode.window.showErrorMessage(
+              `Re-checkout failed: ${err.message}`
+            );
+          }
+          return;
+        }
+
+        const confirm = await vscode.window.showWarningMessage(
+          `Re-checkout ${selections.length} members from the IBM i? This will overwrite your local copies and discard any local changes.`,
+          { modal: true },
+          "Re-checkout All"
+        );
+        if (confirm !== "Re-checkout All") {
+          return;
+        }
+
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: "Re-checking out from IBM i...", cancellable: true },
+          async (progress, token) => {
+            let succeeded = 0;
+            let errors = 0;
+            let cancelled = false;
+
+            for (let i = 0; i < selections.length; i++) {
+              if (token.isCancellationRequested) {
+                cancelled = true;
+                break;
+              }
+              const entry = selections[i].entry;
+              progress.report({ message: `${entry.memberName} (${i + 1}/${selections.length})` });
+              try {
+                await service.recheckout(entry);
+                succeeded++;
+              } catch (err: any) {
+                errors++;
+                outputChannel.appendLine(`[recheckout] Error for ${formatMemberPath(entry)}: ${err.message}`);
+              }
+            }
+
+            if (cancelled) {
+              vscode.window.showInformationMessage(
+                `Re-checkout cancelled. ${succeeded}/${selections.length} member(s) re-checked out before cancelling.`
+              );
+            } else if (errors > 0) {
+              vscode.window.showWarningMessage(
+                `Re-checked out ${succeeded}/${selections.length} member(s) from IBM i. ${errors} error(s) — see IBM i Checkout output panel.`
+              );
+              outputChannel.show();
+            } else {
+              vscode.window.showInformationMessage(
+                `Successfully re-checked out ${succeeded} member(s) from IBM i.`
+              );
+            }
+          }
+        );
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
       "ibmi-checkout.refreshAllRemote",
       async () => {
         const system = getSystemName();
@@ -408,13 +518,13 @@ function registerCommands(
           },
           async (progress) => {
             const total = entries.length;
-            const { inSync, modified, conflict, errors } =
+            const { inSync, modified, conflict, missing, errors } =
               await service.refreshAllRemoteStatus();
             progress.report({ increment: 100, message: `${total}/${total}` });
 
-            if (errors > 0) {
+            if (errors > 0 || missing > 0) {
               vscode.window.showWarningMessage(
-                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${errors} error(s).`
+                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${missing} missing on remote, ${errors} error(s).`
               );
             } else if (conflict > 0) {
               vscode.window.showWarningMessage(
@@ -437,41 +547,50 @@ function registerCommands(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "ibmi-checkout.refreshSourceFileRemote",
+      "ibmi-checkout.refreshLibraryRemote",
       async (item: TreeItemType) => {
-        if (item?.kind !== "sourceFile") {
+        if (item?.kind !== "library") {
           return;
         }
         await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `Refreshing ${item.library}/${item.sourceFile}...`,
+            title: `Refreshing ${item.library}...`,
             cancellable: false,
           },
           async () => {
-            const { modified, conflict, errors } =
-              await service.refreshSourceFileRemoteStatus(
-                item.system,
-                item.library,
-                item.sourceFile
-              );
-            if (errors > 0) {
-              vscode.window.showWarningMessage(
-                `${item.library}/${item.sourceFile}: ${conflict} conflict(s), ${modified} modified, ${errors} error(s).`
-              );
-            } else if (conflict > 0) {
-              vscode.window.showWarningMessage(
-                `${item.library}/${item.sourceFile}: ${conflict} member(s) have conflicting remote changes.`
-              );
-            } else if (modified > 0) {
-              vscode.window.showInformationMessage(
-                `${item.library}/${item.sourceFile}: ${modified} member(s) have local changes pending merge.`
-              );
-            } else {
-              vscode.window.showInformationMessage(
-                `${item.library}/${item.sourceFile}: all members are in sync.`
-              );
-            }
+            const tally = await service.refreshLibraryRemoteStatus(
+              item.system,
+              item.library
+            );
+            showGroupRefreshSummary(item.library, tally);
+          }
+        );
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "ibmi-checkout.refreshSourceFileRemote",
+      async (item: TreeItemType) => {
+        if (item?.kind !== "sourceFile") {
+          return;
+        }
+        const groupName = `${item.library}/${item.sourceFile}`;
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Refreshing ${groupName}...`,
+            cancellable: false,
+          },
+          async () => {
+            const tally = await service.refreshSourceFileRemoteStatus(
+              item.system,
+              item.library,
+              item.sourceFile
+            );
+            showGroupRefreshSummary(groupName, tally);
           }
         );
       }
@@ -532,6 +651,10 @@ function registerCommands(
               vscode.window.showInformationMessage(
                 `${memberPath} has local changes not yet merged back. Remote is unchanged.`
               );
+            } else if (result === "remote-missing") {
+              vscode.window.showErrorMessage(
+                `${memberPath} does not exist on the remote IBM i. Your local copy is the only one left.`
+              );
             } else {
               const choice = await vscode.window.showWarningMessage(
                 `${memberPath} has changed on the remote IBM i and differs from your local copy.`,
@@ -577,12 +700,12 @@ function registerCommands(
           },
           async () => {
             const entries = selections.map((s) => s.entry);
-            const { inSync, modified, conflict, errors } =
+            const { inSync, modified, conflict, missing, errors } =
               await service.refreshEntries(entries);
 
-            if (errors > 0) {
+            if (errors > 0 || missing > 0) {
               vscode.window.showWarningMessage(
-                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${errors} error(s).`
+                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${missing} missing on remote, ${errors} error(s).`
               );
             } else if (conflict > 0) {
               vscode.window.showWarningMessage(
@@ -840,7 +963,7 @@ function registerCommands(
     vscode.commands.registerCommand("ibmi-checkout.expandAll", async () => {
       const roots = treeProvider.getChildren();
       for (const root of roots) {
-        await treeView.reveal(root, { expand: true, select: false, focus: false });
+        await treeView.reveal(root, { expand: 2, select: false, focus: false });
       }
     })
   );
@@ -871,7 +994,7 @@ function registerCommands(
     if (value) {
       const roots = treeProvider.getChildren();
       for (const root of roots) {
-        await treeView.reveal(root, { expand: true, select: false, focus: false });
+        await treeView.reveal(root, { expand: 2, select: false, focus: false });
       }
     }
   };
@@ -1014,7 +1137,7 @@ function extractSourceFileInfo(node: any): { library: string; sourceFile: string
         const lastPart = parts[parts.length - 1];
         const dotIdx = lastPart.lastIndexOf(".");
         const fileName = dotIdx > 0 ? lastPart.substring(0, dotIdx) : lastPart;
-        return { library: parts[0], sourceFile: fileName };
+        return { library: parts[parts.length - 2], sourceFile: fileName };
       }
     }
   }
@@ -1052,16 +1175,18 @@ function extractMemberInfo(node: any): {
         : vscode.Uri.parse(node.resourceUri.toString());
 
     if (uri.scheme === "member") {
-      // member:// URIs: path is /LIB/SRCFILE/MEMBER.EXT
+      // member:// URIs: path is /LIB/SRCFILE/MEMBER.EXT, or /ASP/LIB/SRCFILE/MEMBER.EXT
+      // for iASP members — read from the end so an ASP prefix is never taken as the library.
       const parts = uri.path.split("/").filter(Boolean);
       if (parts.length >= 3) {
-        const lastPart = parts[parts.length - 1];
+        const n = parts.length;
+        const lastPart = parts[n - 1];
         const dotIdx = lastPart.lastIndexOf(".");
         const memberName = dotIdx > 0 ? lastPart.substring(0, dotIdx) : lastPart;
         const ext = dotIdx > 0 ? lastPart.substring(dotIdx + 1) : "mbr";
         result = {
-          library: parts[0],
-          sourceFile: parts[1],
+          library: parts[n - 3],
+          sourceFile: parts[n - 2],
           memberName,
           extension: ext.toLowerCase(),
         };

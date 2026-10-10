@@ -17,7 +17,8 @@ export type CheckoutStatus =
   | "merged"
   | "modified"
   | "conflict"
-  | "in-sync";
+  | "in-sync"
+  | "remote-missing";
 
 export interface CheckoutIndex {
   version: number;
@@ -28,6 +29,7 @@ export interface RefreshTally {
   inSync: number;
   modified: number;
   conflict: number;
+  missing: number;
   errors: number;
 }
 
@@ -53,5 +55,6 @@ export function formatMemberPath(entry: CheckedOutMember): string {
 }
 
 export type TreeItemType =
+  | { kind: "library"; system: string; library: string }
   | { kind: "sourceFile"; system: string; library: string; sourceFile: string }
   | { kind: "member"; entry: CheckedOutMember };

@@ -23,6 +23,12 @@ export interface IBMiContent {
     member: string,
     content: string
   ): Promise<boolean>;
+  checkObject(object: {
+    library: string;
+    name: string;
+    type: string;
+    member?: string;
+  }): Promise<boolean>;
   getMemberList(filter: {
     library: string;
     sourceFile: string;
@@ -116,3 +122,20 @@ export async function listSourceFileMembers(
   return content.getMemberList({ library, sourceFile });
 }
 
+
+export async function memberExists(
+  library: string,
+  sourceFile: string,
+  member: string
+): Promise<boolean> {
+  const content = getContent();
+  if (!content) {
+    throw new Error("Not connected to IBM i");
+  }
+  return content.checkObject({
+    library,
+    name: sourceFile,
+    type: "*FILE",
+    member,
+  });
+}

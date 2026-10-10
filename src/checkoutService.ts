@@ -14,6 +14,7 @@ import {
   downloadMemberContent,
   uploadMemberContent,
   getSystemName,
+  memberExists,
 } from "./codeForIBMi";
 
 export class CheckoutService {
@@ -170,14 +171,34 @@ export class CheckoutService {
 
   async refreshRemoteStatus(
     entry: CheckedOutMember
-  ): Promise<"in-sync" | "modified" | "conflict"> {
+  ): Promise<"in-sync" | "modified" | "conflict" | "remote-missing"> {
     const localUri = vscode.Uri.file(entry.localPath);
+    const memberPath = `${entry.library}/${entry.sourceFile}/${entry.memberName}`;
 
-    const remoteContent = await downloadMemberContent(
-      entry.library,
-      entry.sourceFile,
-      entry.memberName
-    );
+    let remoteContent: string;
+    try {
+      remoteContent = await downloadMemberContent(
+        entry.library,
+        entry.sourceFile,
+        entry.memberName
+      );
+    } catch (err: any) {
+      // A failed download may just be a transient error; only flag the member
+      // as missing when the IBM i confirms it no longer exists.
+      let exists = true;
+      try {
+        exists = await memberExists(entry.library, entry.sourceFile, entry.memberName);
+      } catch {
+        // can't tell — treat as a normal error below
+      }
+      if (!exists) {
+        this.log.appendLine(`[refresh] ${memberPath}  → remote-missing`);
+        await this.setStatus(entry, "remote-missing");
+        return "remote-missing";
+      }
+      throw err;
+    }
+
     const remoteHash = this.hashContent(remoteContent, localUri);
 
     const localContent = Buffer.from(
@@ -185,29 +206,41 @@ export class CheckoutService {
     ).toString("utf-8");
     const localHash = this.hashContent(localContent, localUri);
 
-    let status: CheckoutStatus;
+    // Baselines stored before the hash normalization changed were computed with
+    // the legacy algorithm; accept those too and upgrade the stored baseline.
+    const remoteUnchanged =
+      remoteHash === entry.remoteHashAtCheckout ||
+      this.legacyHashContent(remoteContent, localUri) === entry.remoteHashAtCheckout;
+    if (remoteUnchanged) {
+      entry.remoteHashAtCheckout = remoteHash;
+    }
+
+    let status: "in-sync" | "modified" | "conflict";
     if (localHash === remoteHash) {
       status = "in-sync";
-    } else if (remoteHash === entry.remoteHashAtCheckout) {
+    } else if (remoteUnchanged) {
       status = "modified";
     } else {
       status = "conflict";
     }
 
     this.log.appendLine(
-      `[refresh] ${entry.library}/${entry.sourceFile}/${entry.memberName}` +
+      `[refresh] ${memberPath}` +
       `  local=${localHash.substring(0, 12)}` +
       `  remote=${remoteHash.substring(0, 12)}` +
       `  baseline=${entry.remoteHashAtCheckout?.substring(0, 12)}` +
       `  → ${status}`
     );
 
+    await this.setStatus(entry, status);
+    return status;
+  }
+
+  private async setStatus(entry: CheckedOutMember, status: CheckoutStatus): Promise<void> {
     entry.status = status;
     entry.lastCheckedAt = new Date().toISOString();
     await this.saveIndex();
     this._onDidChange.fire();
-
-    return status;
   }
 
   async recheckout(entry: CheckedOutMember): Promise<void> {
@@ -268,10 +301,20 @@ export class CheckoutService {
     return this.refreshEntries(entries);
   }
 
+  async refreshLibraryRemoteStatus(
+    system: string,
+    library: string
+  ): Promise<RefreshTally> {
+    const entries = this.getEntriesForSystem(system).filter(
+      (e) => e.library.toUpperCase() === library.toUpperCase()
+    );
+    return this.refreshEntries(entries);
+  }
+
   async refreshAllRemoteStatus(): Promise<RefreshTally> {
     const system = getSystemName();
     if (!system) {
-      return { inSync: 0, modified: 0, conflict: 0, errors: 0 };
+      return { inSync: 0, modified: 0, conflict: 0, missing: 0, errors: 0 };
     }
 
     return this.refreshEntries(this.getEntriesForSystem(system));
@@ -280,7 +323,7 @@ export class CheckoutService {
   async refreshEntries(
     entries: CheckedOutMember[]
   ): Promise<RefreshTally> {
-    const tally: RefreshTally = { inSync: 0, modified: 0, conflict: 0, errors: 0 };
+    const tally: RefreshTally = { inSync: 0, modified: 0, conflict: 0, missing: 0, errors: 0 };
 
     for (const entry of entries) {
       try {
@@ -289,6 +332,8 @@ export class CheckoutService {
           tally.inSync++;
         } else if (result === "modified") {
           tally.modified++;
+        } else if (result === "remote-missing") {
+          tally.missing++;
         } else {
           tally.conflict++;
         }
@@ -333,12 +378,28 @@ export class CheckoutService {
     const filesConfig = vscode.workspace.getConfiguration("files", resource);
     const trimTrailingWhitespace = filesConfig.get<boolean>("trimTrailingWhitespace", false);
 
+    let normalized = content
+      .replace(/^\uFEFF/, "")
+      .replace(/\r\n?/g, "\n");
+    if (trimTrailingWhitespace) {
+      normalized = normalized.replace(/[ \t]+$/gm, "");
+    }
+    // Ignore everything after the last non-blank character: trailing blank
+    // lines (including lines holding only blank-padding) never affect the hash.
+    // Anchored to the very end (no /m flag), so embedded blank lines still count.
+    normalized = normalized.replace(/\s+$/, "");
+    return crypto.createHash("sha256").update(normalized, "utf-8").digest("hex");
+  }
+
+  /** Hash algorithm used before 1.0.2 — kept only to match old stored baselines. */
+  private legacyHashContent(content: string, resource?: vscode.Uri): string {
+    const filesConfig = vscode.workspace.getConfiguration("files", resource);
+    const trimTrailingWhitespace = filesConfig.get<boolean>("trimTrailingWhitespace", false);
+
     let normalized = content.replace(/\r\n/g, "\n");
     if (trimTrailingWhitespace) {
       normalized = normalized.replace(/[ \t]+$/gm, "");
     }
-    // Only a trailing run of blank lines is ignored (anchored to the very end of
-    // the string, no /m flag) — leading/embedded blank lines are left untouched.
     normalized = normalized.replace(/\n+$/, "");
     return crypto.createHash("sha256").update(normalized, "utf-8").digest("hex");
   }
