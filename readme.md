@@ -13,10 +13,12 @@ Editing source members directly through Code for IBM i saves straight to the IBM
 ## Important
 I would go into the settings and change the local folder to a different location than the default. The default is in the extension storage. This just makes finding the folder easier to open in the workspace.
 
+The easiest way is **IBM i Checkout: Move Checkout Folder...** (Command Palette, or the **...** menu on the Checked Out Members panel). It moves any members you've already checked out into the new folder and updates the setting for you. Editing the setting directly only affects new checkouts — existing ones stay where they are.
+
 ## Settings
 - **Allow Checkout From Protected Filter** - allows you to check out a member from a protect object browser filter
 - **Auto Open On Checkout** - automatically open the downloaded source member when checking out
-- **Local Folder** - what folder to store the checked out member to. (It's recommended to change this to another folder).
+- **Local Folder** - what folder to store the checked out member to. (It's recommended to change this to another folder — use **Move Checkout Folder...** to bring existing checkouts along).
 - **Warn On Redownload** - what that the member has already been checked out before overwriting it.
 
 ## Features
@@ -82,6 +84,7 @@ Right-click a checkout for comparison tools: **Select for Compare** (mark one ch
 - **Run Action** — trigger Code for IBM i's local source actions (compile, deploy, etc.)
 - **Reveal in File Explorer** — show the local file in your OS file manager
 - **Copy Member Path** — copy `LIBRARY/SOURCEFILE(MEMBER)` to the clipboard
+- **Move Checkout Folder...** — choose a new local folder; existing checkouts are moved there, the index is updated, and the Local Folder setting is changed (panel **...** menu or Command Palette)
 - **Discard Checkout** — delete the local file and stop tracking it (with confirmation)
 
 ### Multi-Select
@@ -92,7 +95,7 @@ The Checked Out Members panel supports selecting multiple checkouts at once. **O
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `ibmi-checkout.localFolder` | *(empty)* | Custom folder for checked-out files. Leave empty to use extension storage. |
+| `ibmi-checkout.localFolder` | *(empty)* | Custom folder for checked-out files. Leave empty to use extension storage. The folder is created automatically on the first checkout. Use **Move Checkout Folder...** to move existing checkouts along with it. |
 | `ibmi-checkout.warnOnRedownload` | `true` | Show warning when checking out a member that is already checked out. |
 | `ibmi-checkout.autoOpenOnCheckout` | `true` | Automatically open the file in the editor after a single-member checkout. |
 | `ibmi-checkout.allowCheckoutFromProtectedFilter` | `false` | Allow checking out members from protected (read-only) filters. |

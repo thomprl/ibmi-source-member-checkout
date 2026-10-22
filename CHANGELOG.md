@@ -1,5 +1,12 @@
 # Change Log
 
+# 1.0.3
+- Added **Move Checkout Folder...** (Command Palette, or the **...** menu on the Checked Out Members panel). Pick a new folder and your existing checkouts are moved into it, the checkout index is updated to the new locations, and the **Local Folder** setting is changed for you.
+  - Files with unsaved changes can be saved and moved, or left where they are.
+  - If a file already exists in the new folder you choose whether to overwrite it or skip that member.
+  - Open editors for moved files are reopened from the new location, and empty folders left behind are cleaned up.
+  - Any member that can't be moved keeps working from its old location; details go to the **IBM i Checkout** output panel.
+
 # 1.0.2
 - Sync status is now more reliable: trailing blank lines (including lines containing only blank padding), stray carriage returns and byte-order marks are ignored when comparing local and remote source, so members no longer show as out of sync just because blank lines were added at the end.
 - Existing checkouts are upgraded automatically on the next refresh, with no false conflicts from the hash change.

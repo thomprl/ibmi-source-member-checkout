@@ -3,7 +3,7 @@ import { CheckoutService } from "./checkoutService";
 import { CheckoutTreeProvider } from "./checkoutTreeProvider";
 import { MergeHandler } from "./mergeHandler";
 import { getInstance, getSystemName, listSourceFileMembers } from "./codeForIBMi";
-import { RefreshTally, TreeItemType, formatMemberPath } from "./types";
+import { RefreshTally, TreeItemType, formatMemberPath, isSamePath, pathKey } from "./types";
 
 let outputChannel: vscode.OutputChannel;
 
@@ -1035,6 +1035,176 @@ function registerCommands(
       updateSearchState();
     })
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ibmi-checkout.moveCheckoutFolder", async () => {
+      try {
+        await moveCheckoutFolder(service);
+      } catch (err: any) {
+        outputChannel.appendLine(`[move] Error: ${err.message}`);
+        vscode.window.showErrorMessage(`Move checkout folder failed: ${err.message}`);
+      }
+    })
+  );
+}
+
+async function moveCheckoutFolder(service: CheckoutService): Promise<void> {
+  const currentRoot = service.getCheckoutRoot();
+  const picked = await vscode.window.showOpenDialog({
+    title: "Choose the new checkout folder",
+    defaultUri: currentRoot,
+    canSelectFolders: true,
+    canSelectFiles: false,
+    canSelectMany: false,
+    openLabel: "Use This Folder",
+  });
+  if (!picked || picked.length === 0) {
+    return;
+  }
+  const newRoot = picked[0];
+
+  // Includes entries left behind in older folders, so a move also consolidates them
+  const toMove = service
+    .getAllEntries()
+    .filter((e) => !isSamePath(vscode.Uri.file(e.localPath), service.buildLocalUri(e, newRoot)));
+
+  if (toMove.length === 0) {
+    await updateLocalFolderSetting(newRoot);
+    vscode.window.showInformationMessage(
+      isSamePath(newRoot, currentRoot)
+        ? `Checkouts are already stored in ${newRoot.fsPath}.`
+        : `New checkouts will be stored in ${newRoot.fsPath}.`
+    );
+    return;
+  }
+
+  const confirm = await vscode.window.showWarningMessage(
+    `Move ${toMove.length} checked-out member(s) to ${newRoot.fsPath}?`,
+    {
+      modal: true,
+      detail: "Each file is copied to the new folder and then removed from the old one. The Local Folder setting is updated to the new folder.",
+    },
+    "Move"
+  );
+  if (confirm !== "Move") {
+    return;
+  }
+
+  // Unsaved edits would be lost once the old file is deleted
+  const moveKeys = new Set(toMove.map((e) => pathKey(e.localPath)));
+  const dirtyDocs = vscode.workspace.textDocuments.filter(
+    (d) => d.isDirty && moveKeys.has(pathKey(d.uri.fsPath))
+  );
+  let entries = toMove;
+  if (dirtyDocs.length > 0) {
+    const choice = await vscode.window.showWarningMessage(
+      `${dirtyDocs.length} of these files have unsaved changes.`,
+      { modal: true, detail: "Save them and move them, or leave them where they are for now?" },
+      "Save and Move",
+      "Skip Them"
+    );
+    if (!choice) {
+      return;
+    }
+    if (choice === "Save and Move") {
+      for (const doc of dirtyDocs) {
+        await doc.save();
+      }
+    } else {
+      const dirtyKeys = new Set(dirtyDocs.map((d) => pathKey(d.uri.fsPath)));
+      entries = entries.filter((e) => !dirtyKeys.has(pathKey(e.localPath)));
+    }
+  }
+
+  let overwriteExisting = false;
+  const existing: string[] = [];
+  for (const entry of entries) {
+    try {
+      await vscode.workspace.fs.stat(service.buildLocalUri(entry, newRoot));
+      existing.push(formatMemberPath(entry));
+    } catch {
+      // nothing there yet
+    }
+  }
+  if (existing.length > 0) {
+    const choice = await vscode.window.showWarningMessage(
+      `${existing.length} file(s) already exist in the new folder.`,
+      {
+        modal: true,
+        detail: `${existing.slice(0, 10).join("\n")}${existing.length > 10 ? "\n…" : ""}\n\nOverwrite them with the checked-out copies, or skip those members?`,
+      },
+      "Overwrite",
+      "Skip Them"
+    );
+    if (!choice) {
+      return;
+    }
+    overwriteExisting = choice === "Overwrite";
+  }
+
+  // Remember which moved files were open so they can be reopened from the new folder
+  const openTabs = new Map<string, vscode.Tab[]>();
+  for (const tab of vscode.window.tabGroups.all.flatMap((g) => g.tabs)) {
+    if (tab.input instanceof vscode.TabInputText) {
+      const key = pathKey(tab.input.uri.fsPath);
+      openTabs.set(key, [...(openTabs.get(key) ?? []), tab]);
+    }
+  }
+
+  const result = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Moving checkouts" },
+    (progress) => service.relocateCheckouts(entries, newRoot, overwriteExisting, progress)
+  );
+
+  await updateLocalFolderSetting(newRoot);
+
+  for (const { from, to } of result.moved) {
+    const tabs = openTabs.get(pathKey(from.fsPath));
+    if (!tabs) {
+      continue;
+    }
+    const viewColumn = tabs[0].group.viewColumn;
+    await vscode.window.tabGroups.close(tabs);
+    await vscode.window.showTextDocument(to, { viewColumn, preview: false, preserveFocus: true });
+  }
+
+  outputChannel.appendLine(
+    `[move] Moved ${result.moved.length} checkout(s) to ${newRoot.fsPath}` +
+      (result.missing.length ? `; ${result.missing.length} had no local file` : "") +
+      (result.skipped.length ? `; skipped ${result.skipped.length} already in the new folder` : "") +
+      (result.failed.length ? `; ${result.failed.length} failed` : "")
+  );
+  for (const { entry, error } of result.failed) {
+    outputChannel.appendLine(`[move]   ${formatMemberPath(entry)}: ${error}`);
+  }
+
+  const movedCount = result.moved.length + result.missing.length;
+  const skippedCount = toMove.length - entries.length + result.skipped.length;
+  if (result.failed.length > 0) {
+    outputChannel.show();
+    vscode.window.showWarningMessage(
+      `Moved ${movedCount} checkout(s); ${result.failed.length} could not be moved and still use their old location. See the 'IBM i Checkout' output for details.`
+    );
+  } else if (skippedCount > 0) {
+    vscode.window.showInformationMessage(
+      `Moved ${movedCount} checkout(s) to ${newRoot.fsPath}; ${skippedCount} skipped and still use their old location.`
+    );
+  } else {
+    vscode.window.showInformationMessage(
+      `Moved ${movedCount} checkout(s) to ${newRoot.fsPath}.`
+    );
+  }
+}
+
+/** Writes the setting at the scope it's already defined in, so a workspace value isn't shadowed. */
+async function updateLocalFolderSetting(folder: vscode.Uri): Promise<void> {
+  const config = vscode.workspace.getConfiguration("ibmi-checkout");
+  const inspected = config.inspect<string>("localFolder");
+  const target =
+    inspected?.workspaceValue !== undefined
+      ? vscode.ConfigurationTarget.Workspace
+      : vscode.ConfigurationTarget.Global;
+  await config.update("localFolder", folder.fsPath, target);
 }
 
 async function checkoutMembersBatch(

@@ -5,9 +5,11 @@ import {
   CheckoutIndex,
   CheckoutStatus,
   RefreshTally,
+  RelocateResult,
   buildCheckoutId,
   buildLocalFileName,
   formatMemberPath,
+  isSamePath,
   sanitizeSystemName,
 } from "./types";
 import {
@@ -404,32 +406,109 @@ export class CheckoutService {
     return crypto.createHash("sha256").update(normalized, "utf-8").digest("hex");
   }
 
-  private async getLocalPath(entry: CheckedOutMember): Promise<string> {
+  getAllEntries(): CheckedOutMember[] {
+    return [...this.index.entries];
+  }
+
+  /** Folder new checkouts are written under: the localFolder setting, or extension storage. */
+  getCheckoutRoot(): vscode.Uri {
     const config = vscode.workspace.getConfiguration("ibmi-checkout");
     const customFolder = config.get<string>("localFolder", "");
-    const systemFolder = sanitizeSystemName(entry.system);
-    const fileName = buildLocalFileName(entry);
+    return customFolder ? vscode.Uri.file(customFolder) : this.checkoutsUri;
+  }
 
-    let baseDir: vscode.Uri;
-    if (customFolder) {
-      baseDir = vscode.Uri.joinPath(
-        vscode.Uri.file(customFolder),
-        systemFolder, entry.library, entry.sourceFile
-      );
-    } else {
-      baseDir = vscode.Uri.joinPath(
-        this.checkoutsUri,
-        systemFolder, entry.library, entry.sourceFile
-      );
+  /** Where an entry's local file belongs under the given root folder. */
+  buildLocalUri(entry: CheckedOutMember, root: vscode.Uri): vscode.Uri {
+    return vscode.Uri.joinPath(
+      root,
+      sanitizeSystemName(entry.system), entry.library, entry.sourceFile,
+      buildLocalFileName(entry)
+    );
+  }
+
+  /**
+   * Moves each entry's local file under newRoot and repoints the index at it.
+   * Entries whose file can't be moved keep their old path, so they still work.
+   */
+  async relocateCheckouts(
+    entries: CheckedOutMember[],
+    newRoot: vscode.Uri,
+    overwriteExisting: boolean,
+    progress?: vscode.Progress<{ message?: string; increment?: number }>
+  ): Promise<RelocateResult> {
+    const result: RelocateResult = { moved: [], missing: [], skipped: [], failed: [] };
+
+    for (const entry of entries) {
+      progress?.report({ message: formatMemberPath(entry), increment: 100 / entries.length });
+
+      const from = vscode.Uri.file(entry.localPath);
+      const to = this.buildLocalUri(entry, newRoot);
+      if (isSamePath(from, to)) {
+        continue;
+      }
+
+      try {
+        await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(to, ".."));
+
+        if (!(await uriExists(from))) {
+          // Nothing to copy — just point the entry at its new home
+          entry.localPath = to.fsPath;
+          result.missing.push(entry);
+          continue;
+        }
+
+        if (!overwriteExisting && (await uriExists(to))) {
+          result.skipped.push(entry);
+          continue;
+        }
+
+        await vscode.workspace.fs.copy(from, to, { overwrite: true });
+        entry.localPath = to.fsPath;
+        result.moved.push({ entry, from, to });
+      } catch (err: any) {
+        result.failed.push({ entry, error: err.message ?? String(err) });
+        this.log.appendLine(`[move] Failed to move ${from.fsPath}: ${err.message ?? err}`);
+        continue;
+      }
+
+      try {
+        await vscode.workspace.fs.delete(from);
+        await this.removeEmptyParents(from);
+      } catch (err: any) {
+        this.log.appendLine(
+          `[move] Copied ${formatMemberPath(entry)} but could not remove the old file ${from.fsPath}: ${err.message ?? err}`
+        );
+      }
     }
 
+    await this.saveIndex();
+    this._onDidChange.fire();
+    return result;
+  }
+
+  /** Removes the now-empty source file, library and system folders left behind by a move. */
+  private async removeEmptyParents(fileUri: vscode.Uri): Promise<void> {
+    let dir = vscode.Uri.joinPath(fileUri, "..");
+    for (let level = 0; level < 3; level++) {
+      const children = await vscode.workspace.fs.readDirectory(dir);
+      if (children.length > 0) {
+        return;
+      }
+      await vscode.workspace.fs.delete(dir);
+      dir = vscode.Uri.joinPath(dir, "..");
+    }
+  }
+
+  private async getLocalPath(entry: CheckedOutMember): Promise<string> {
+    const fileUri = this.buildLocalUri(entry, this.getCheckoutRoot());
+
     try {
-      await vscode.workspace.fs.createDirectory(baseDir);
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(fileUri, ".."));
     } catch {
       // already exists
     }
 
-    return vscode.Uri.joinPath(baseDir, fileName).fsPath;
+    return fileUri.fsPath;
   }
 
   private async loadIndex(): Promise<void> {
@@ -447,5 +526,14 @@ export class CheckoutService {
       this.indexUri,
       Buffer.from(data, "utf-8")
     );
+  }
+}
+
+async function uriExists(uri: vscode.Uri): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(uri);
+    return true;
+  } catch {
+    return false;
   }
 }

@@ -2,7 +2,7 @@
   "name": "ibmi-source-member-checkout",
   "displayName": "IBMi Source Member Checkout",
   "description": "Check out, track, and merge IBM i source members with a safe diff-based workflow. Works with Code for IBM i.",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "publisher": "RickyThompson",
   "license": "GPL-3.0",
   "icon": "images/icon.png",
@@ -197,6 +197,12 @@
         "title": "Clear Search Filter",
         "category": "IBM i Checkout",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "ibmi-checkout.moveCheckoutFolder",
+        "title": "Move Checkout Folder...",
+        "category": "IBM i Checkout",
+        "icon": "$(folder-opened)"
       }
     ],
     "menus": {
@@ -377,6 +383,11 @@
           "command": "ibmi-checkout.clearSearch",
           "when": "view == checkoutView && ibmi-checkout:searchActive",
           "group": "navigation@4"
+        },
+        {
+          "command": "ibmi-checkout.moveCheckoutFolder",
+          "when": "view == checkoutView",
+          "group": "9_folder@1"
         }
       ]
     },
@@ -386,7 +397,7 @@
         "ibmi-checkout.localFolder": {
           "type": "string",
           "default": "",
-          "description": "Custom folder for checked-out files. Leave empty to use extension storage."
+          "markdownDescription": "Custom folder for checked-out files. Leave empty to use extension storage.\n\nChanging this here only affects new checkouts. To move existing checkouts too, use **IBM i Checkout: Move Checkout Folder...** from the Command Palette or the Checked Out Members panel menu."
         },
         "ibmi-checkout.warnOnRedownload": {
           "type": "boolean",
