@@ -3,7 +3,15 @@ import { CheckoutService } from "./checkoutService";
 import { CheckoutTreeProvider } from "./checkoutTreeProvider";
 import { MergeHandler } from "./mergeHandler";
 import { getInstance, getSystemName, listSourceFileMembers } from "./codeForIBMi";
-import { RefreshTally, TreeItemType, formatMemberPath, isSamePath, pathKey } from "./types";
+import {
+  CheckedOutMember,
+  RefreshTally,
+  TreeItemType,
+  UntrackedFile,
+  formatMemberPath,
+  isSamePath,
+  pathKey,
+} from "./types";
 
 let outputChannel: vscode.OutputChannel;
 
@@ -28,7 +36,118 @@ export async function activate(
 
   subscribeToConnectionEvents(treeProvider);
 
-  registerCommands(context, service, treeProvider, mergeHandler, treeView);
+  const newFileWatcher = new NewFileWatcher(service);
+  context.subscriptions.push(
+    newFileWatcher,
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (
+        e.affectsConfiguration("ibmi-checkout.localFolder") ||
+        e.affectsConfiguration("ibmi-checkout.watchForNewFiles")
+      ) {
+        newFileWatcher.restart();
+      }
+    })
+  );
+
+  registerCommands(context, service, treeProvider, mergeHandler, treeView, newFileWatcher);
+}
+
+/**
+ * Watches the checkout folder for files created outside the extension (by
+ * hand, a tool or an AI assistant) and offers to add them to the checkouts.
+ */
+class NewFileWatcher implements vscode.Disposable {
+  private watcher: vscode.FileSystemWatcher | undefined;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private suspended = 0;
+  private prompting = false;
+  /** Files the user chose to ignore this session. */
+  private readonly ignored = new Set<string>();
+
+  constructor(private readonly service: CheckoutService) {
+    this.restart();
+  }
+
+  restart(): void {
+    this.watcher?.dispose();
+    this.watcher = undefined;
+
+    const config = vscode.workspace.getConfiguration("ibmi-checkout");
+    if (!config.get<boolean>("watchForNewFiles", false)) {
+      return;
+    }
+
+    // <root>/<system>/<LIB>/<SRCF>/<MBR>.<ext>
+    this.watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(this.service.getCheckoutRoot(), "*/*/*/*"),
+      false,
+      true,
+      true
+    );
+    this.watcher.onDidCreate(() => this.schedule());
+  }
+
+  /** Runs work that writes into the checkout folder without prompting about its files. */
+  async suspendWhile<T>(work: () => Promise<T>): Promise<T> {
+    this.suspended++;
+    try {
+      return await work();
+    } finally {
+      this.suspended--;
+    }
+  }
+
+  private schedule(): void {
+    // Debounced so a checkout has time to record its file in the index,
+    // and a burst of new files produces a single prompt
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => void this.check(), 2000);
+  }
+
+  private async check(): Promise<void> {
+    if (this.suspended > 0) {
+      this.schedule();
+      return;
+    }
+    if (this.prompting) {
+      // "Add…" rescans, so files created meanwhile are picked up then
+      return;
+    }
+
+    const { files } = await this.service.findUntrackedFiles();
+    const fresh = files.filter((f) => !this.ignored.has(pathKey(f.uri.fsPath)));
+    if (fresh.length === 0) {
+      return;
+    }
+
+    this.prompting = true;
+    try {
+      const names = fresh
+        .slice(0, 3)
+        .map((f) => `${f.memberName}.${f.extension.toUpperCase()}`)
+        .join(", ");
+      const more = fresh.length > 3 ? ` and ${fresh.length - 3} more` : "";
+      const choice = await vscode.window.showInformationMessage(
+        `Found ${fresh.length} new file(s) in the checkout folder: ${names}${more}. Add them to your checkouts so they can be created on the IBM i?`,
+        "Add…",
+        "Ignore"
+      );
+      if (choice === "Add…") {
+        await scanForNewFiles(this.service);
+      } else if (choice === "Ignore") {
+        for (const f of fresh) {
+          this.ignored.add(pathKey(f.uri.fsPath));
+        }
+      }
+    } finally {
+      this.prompting = false;
+    }
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer);
+    this.watcher?.dispose();
+  }
 }
 
 function subscribeToConnectionEvents(
@@ -57,21 +176,37 @@ function resolveMemberSelections(
   );
 }
 
+/** Counts that don't fit the in-sync/modified/conflict summary, appended to it. */
+function pendingNotes(localOnly: number, localMissing: number): string {
+  return (
+    (localOnly > 0 ? ` ${localOnly} new member(s) are not on the IBM i yet.` : "") +
+    (localMissing > 0 ? ` ${localMissing} local file(s) are missing.` : "")
+  );
+}
+
 function showGroupRefreshSummary(
   groupName: string,
-  { modified, conflict, missing, errors }: RefreshTally
+  { modified, conflict, missing, localOnly, localMissing, errors }: RefreshTally
 ): void {
   if (errors > 0 || missing > 0) {
     vscode.window.showWarningMessage(
-      `${groupName}: ${conflict} conflict(s), ${modified} modified, ${missing} missing on remote, ${errors} error(s).`
+      `${groupName}: ${conflict} conflict(s), ${modified} modified, ${missing} missing on remote, ${errors} error(s).${pendingNotes(localOnly, localMissing)}`
     );
   } else if (conflict > 0) {
     vscode.window.showWarningMessage(
-      `${groupName}: ${conflict} member(s) have conflicting remote changes.`
+      `${groupName}: ${conflict} member(s) have conflicting remote changes.${pendingNotes(localOnly, localMissing)}`
     );
   } else if (modified > 0) {
     vscode.window.showInformationMessage(
-      `${groupName}: ${modified} member(s) have local changes pending merge.`
+      `${groupName}: ${modified} member(s) have local changes pending merge.${pendingNotes(localOnly, localMissing)}`
+    );
+  } else if (localMissing > 0) {
+    vscode.window.showWarningMessage(
+      `${groupName}:${pendingNotes(localOnly, localMissing)} Everything else is in sync.`
+    );
+  } else if (localOnly > 0) {
+    vscode.window.showInformationMessage(
+      `${groupName}: ${localOnly} new member(s) are not on the IBM i yet; everything else is in sync.`
     );
   } else {
     vscode.window.showInformationMessage(
@@ -85,7 +220,8 @@ function registerCommands(
   service: CheckoutService,
   treeProvider: CheckoutTreeProvider,
   mergeHandler: MergeHandler,
-  treeView: vscode.TreeView<TreeItemType>
+  treeView: vscode.TreeView<TreeItemType>,
+  newFileWatcher: NewFileWatcher
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand(
@@ -112,7 +248,8 @@ function registerCommands(
               memberInfo.library,
               memberInfo.sourceFile,
               memberInfo.memberName,
-              memberInfo.extension
+              memberInfo.extension,
+              { memberText: memberInfo.text }
             );
           } catch (err: any) {
             if (err.message !== "Checkout cancelled") {
@@ -204,6 +341,7 @@ function registerCommands(
           sourceFile: sourceFileInfo.sourceFile,
           memberName: m.name,
           extension: (m.extension || "mbr").toLowerCase(),
+          text: m.text ?? "",
         }));
 
         await checkoutMembersBatch(service, system, memberInfoList, outputChannel);
@@ -236,6 +374,12 @@ function registerCommands(
 
         for (const sel of selections) {
           try {
+            // VS Code keeps a deleted file's text in memory while its tab is open,
+            // so opening would just show that stale copy
+            if (!(await fileExists(sel.entry.localPath))) {
+              await promptMissingLocalFile(service, sel.entry);
+              continue;
+            }
             const doc = await vscode.workspace.openTextDocument(
               vscode.Uri.file(sel.entry.localPath)
             );
@@ -310,103 +454,27 @@ function registerCommands(
     )
   );
 
+  const uploadHandler = async (item: TreeItemType, allSelections?: TreeItemType[]) => {
+    const selections = resolveMemberSelections(item, allSelections);
+    if (selections.length > 0) {
+      await uploadEntries(service, selections.map((s) => s.entry));
+    }
+  };
+
   context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "ibmi-checkout.uploadToRemote",
-      async (item: TreeItemType, allSelections?: TreeItemType[]) => {
-        const selections = resolveMemberSelections(item, allSelections);
-        if (selections.length === 0) {
-          return;
-        }
+    vscode.commands.registerCommand("ibmi-checkout.uploadToRemote", uploadHandler),
+    vscode.commands.registerCommand("ibmi-checkout.createOnRemote", uploadHandler)
+  );
 
-        if (selections.length === 1) {
-          const entry = selections[0].entry;
-          const memberPath = formatMemberPath(entry);
-
-          const confirm = await vscode.window.showWarningMessage(
-            `Upload local copy of ${memberPath} to the IBM i? This will overwrite the remote member and source dates will not be preserved.`,
-            { modal: true },
-            "Upload"
-          );
-
-          if (confirm !== "Upload") {
-            return;
-          }
-
-          try {
-            const success = await service.uploadToRemote(entry);
-            if (success) {
-              vscode.window.showInformationMessage(
-                `Successfully uploaded ${memberPath} to IBM i.`
-              );
-            } else {
-              vscode.window.showErrorMessage(
-                `Failed to upload ${memberPath} to IBM i.`
-              );
-            }
-          } catch (err: any) {
-            vscode.window.showErrorMessage(
-              `Upload failed: ${err.message}`
-            );
-          }
-          return;
-        }
-
-        const confirm = await vscode.window.showWarningMessage(
-          `Upload ${selections.length} local files to the IBM i? This will overwrite the remote members and source dates will not be preserved.`,
-          { modal: true },
-          "Upload All"
-        );
-        if (confirm !== "Upload All") {
-          return;
-        }
-
-        await vscode.window.withProgress(
-          { location: vscode.ProgressLocation.Notification, title: "Uploading to IBM i...", cancellable: true },
-          async (progress, token) => {
-            let succeeded = 0;
-            let errors = 0;
-            let cancelled = false;
-
-            for (let i = 0; i < selections.length; i++) {
-              if (token.isCancellationRequested) {
-                cancelled = true;
-                break;
-              }
-              const entry = selections[i].entry;
-              progress.report({ message: `${entry.memberName} (${i + 1}/${selections.length})` });
-              try {
-                const success = await service.uploadToRemote(entry);
-                if (success) {
-                  succeeded++;
-                } else {
-                  errors++;
-                  outputChannel.appendLine(`[upload] Failed for ${formatMemberPath(entry)}`);
-                }
-              } catch (err: any) {
-                errors++;
-                outputChannel.appendLine(`[upload] Error for ${formatMemberPath(entry)}: ${err.message}`);
-              }
-            }
-
-            if (cancelled) {
-              vscode.window.showInformationMessage(
-                `Upload cancelled. ${succeeded}/${selections.length} member(s) uploaded before cancelling.`
-              );
-            } else if (errors > 0) {
-              vscode.window.showWarningMessage(
-                `Uploaded ${succeeded}/${selections.length} member(s) to IBM i. ${errors} error(s) — see IBM i Checkout output panel.`
-              );
-              outputChannel.show();
-            } else {
-              vscode.window.showInformationMessage(
-                `Successfully uploaded ${succeeded} member(s) to IBM i.`
-              );
-            }
-          }
-        );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("ibmi-checkout.scanForNewFiles", async () => {
+      try {
+        await scanForNewFiles(service);
+      } catch (err: any) {
+        outputChannel.appendLine(`[scan] Error: ${err.message}`);
+        vscode.window.showErrorMessage(`Scan for new files failed: ${err.message}`);
       }
-    )
+    })
   );
 
   context.subscriptions.push(
@@ -513,26 +581,33 @@ function registerCommands(
         await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: "Refreshing remote status...",
+            title: "Refreshing",
             cancellable: false,
           },
           async (progress) => {
             const total = entries.length;
-            const { inSync, modified, conflict, missing, errors } =
-              await service.refreshAllRemoteStatus();
-            progress.report({ increment: 100, message: `${total}/${total}` });
+            const { inSync, modified, conflict, missing, localOnly, localMissing, errors } =
+              await service.refreshAllRemoteStatus(progress);
 
             if (errors > 0 || missing > 0) {
               vscode.window.showWarningMessage(
-                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${missing} missing on remote, ${errors} error(s).`
+                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${missing} missing on remote, ${errors} error(s).${pendingNotes(localOnly, localMissing)}`
               );
             } else if (conflict > 0) {
               vscode.window.showWarningMessage(
-                `${conflict} member(s) have conflicting remote changes. ${modified} have local-only changes.`
+                `${conflict} member(s) have conflicting remote changes. ${modified} have local-only changes.${pendingNotes(localOnly, localMissing)}`
               );
             } else if (modified > 0) {
               vscode.window.showInformationMessage(
-                `${modified} member(s) have local changes pending merge. Remote is otherwise unchanged.`
+                `${modified} member(s) have local changes pending merge. Remote is otherwise unchanged.${pendingNotes(localOnly, localMissing)}`
+              );
+            } else if (localMissing > 0) {
+              vscode.window.showWarningMessage(
+                `Refresh complete:${pendingNotes(localOnly, localMissing)} Everything else is in sync.`
+              );
+            } else if (localOnly > 0) {
+              vscode.window.showInformationMessage(
+                `${localOnly} new member(s) are not on the IBM i yet; the rest are in sync.`
               );
             } else {
               vscode.window.showInformationMessage(
@@ -555,13 +630,14 @@ function registerCommands(
         await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `Refreshing ${item.library}...`,
+            title: "Refreshing",
             cancellable: false,
           },
-          async () => {
+          async (progress) => {
             const tally = await service.refreshLibraryRemoteStatus(
               item.system,
-              item.library
+              item.library,
+              progress
             );
             showGroupRefreshSummary(item.library, tally);
           }
@@ -581,14 +657,15 @@ function registerCommands(
         await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: `Refreshing ${groupName}...`,
+            title: "Refreshing",
             cancellable: false,
           },
-          async () => {
+          async (progress) => {
             const tally = await service.refreshSourceFileRemoteStatus(
               item.system,
               item.library,
-              item.sourceFile
+              item.sourceFile,
+              progress
             );
             showGroupRefreshSummary(groupName, tally);
           }
@@ -655,6 +732,12 @@ function registerCommands(
               vscode.window.showErrorMessage(
                 `${memberPath} does not exist on the remote IBM i. Your local copy is the only one left.`
               );
+            } else if (result === "local-only") {
+              vscode.window.showInformationMessage(
+                `${memberPath} is not on the IBM i yet. Use Create on IBM i to add it.`
+              );
+            } else if (result === "local-missing") {
+              await promptMissingLocalFile(service, entry);
             } else {
               const choice = await vscode.window.showWarningMessage(
                 `${memberPath} has changed on the remote IBM i and differs from your local copy.`,
@@ -695,25 +778,33 @@ function registerCommands(
         await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: "Refreshing remote status...",
+            title: "Refreshing",
             cancellable: false,
           },
-          async () => {
+          async (progress) => {
             const entries = selections.map((s) => s.entry);
-            const { inSync, modified, conflict, missing, errors } =
-              await service.refreshEntries(entries);
+            const { inSync, modified, conflict, missing, localOnly, localMissing, errors } =
+              await service.refreshEntries(entries, progress);
 
             if (errors > 0 || missing > 0) {
               vscode.window.showWarningMessage(
-                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${missing} missing on remote, ${errors} error(s).`
+                `Refresh complete: ${inSync} in sync, ${modified} modified, ${conflict} conflict(s), ${missing} missing on remote, ${errors} error(s).${pendingNotes(localOnly, localMissing)}`
               );
             } else if (conflict > 0) {
               vscode.window.showWarningMessage(
-                `${conflict} member(s) have conflicting remote changes. ${modified} have local-only changes.`
+                `${conflict} member(s) have conflicting remote changes. ${modified} have local-only changes.${pendingNotes(localOnly, localMissing)}`
               );
             } else if (modified > 0) {
               vscode.window.showInformationMessage(
-                `${modified} member(s) have local changes pending merge. Remote is otherwise unchanged.`
+                `${modified} member(s) have local changes pending merge. Remote is otherwise unchanged.${pendingNotes(localOnly, localMissing)}`
+              );
+            } else if (localMissing > 0) {
+              vscode.window.showWarningMessage(
+                `Refresh complete:${pendingNotes(localOnly, localMissing)} Everything else is in sync.`
+              );
+            } else if (localOnly > 0) {
+              vscode.window.showInformationMessage(
+                `${localOnly} new member(s) are not on the IBM i yet; the rest are in sync.`
               );
             } else {
               vscode.window.showInformationMessage(
@@ -1039,7 +1130,7 @@ function registerCommands(
   context.subscriptions.push(
     vscode.commands.registerCommand("ibmi-checkout.moveCheckoutFolder", async () => {
       try {
-        await moveCheckoutFolder(service);
+        await newFileWatcher.suspendWhile(() => moveCheckoutFolder(service));
       } catch (err: any) {
         outputChannel.appendLine(`[move] Error: ${err.message}`);
         vscode.window.showErrorMessage(`Move checkout folder failed: ${err.message}`);
@@ -1207,10 +1298,265 @@ async function updateLocalFolderSetting(folder: vscode.Uri): Promise<void> {
   await config.update("localFolder", folder.fsPath, target);
 }
 
+/** "lines 12, 40 and 41" / "lines 12, 40, 41, 52, 60 and 3 more" */
+function describeLineNumbers(lines: number[]): string {
+  if (lines.length === 1) {
+    return `line ${lines[0]}`;
+  }
+  if (lines.length <= 5) {
+    return `lines ${lines.slice(0, -1).join(", ")} and ${lines[lines.length - 1]}`;
+  }
+  return `lines ${lines.slice(0, 5).join(", ")} and ${lines.length - 5} more`;
+}
+
+/**
+ * Uploads local copies to the IBM i, creating members that aren't there yet.
+ * Warns first about lines that are too long for the source file.
+ */
+async function uploadEntries(service: CheckoutService, entries: CheckedOutMember[]): Promise<void> {
+  const toCreate = entries.filter((e) => service.needsRemoteCreate(e));
+
+  const lineLengths = new Map<string, number | undefined>();
+  const longLines: string[] = [];
+  for (const entry of entries) {
+    const found = await service.findLongLines(entry, lineLengths);
+    if (found) {
+      longLines.push(
+        `${formatMemberPath(entry)}: ${describeLineNumbers(found.lines)} (limit ${found.maxLength})`
+      );
+    }
+  }
+  const longLineDetail =
+    longLines.length > 0
+      ? `These lines are longer than the source file allows and will be cut off:\n${longLines.slice(0, 10).join("\n")}${longLines.length > 10 ? "\n…" : ""}`
+      : undefined;
+
+  if (entries.length === 1) {
+    const entry = entries[0];
+    const memberPath = formatMemberPath(entry);
+    const creating = toCreate.length === 1;
+
+    const action = creating ? "Create and Upload" : "Upload";
+    const confirm = await vscode.window.showWarningMessage(
+      creating
+        ? `Create ${memberPath} on the IBM i and upload your local copy?`
+        : `Upload local copy of ${memberPath} to the IBM i? This will overwrite the remote member and source dates will not be preserved.`,
+      { modal: true, detail: longLineDetail },
+      action
+    );
+    if (confirm !== action) {
+      return;
+    }
+
+    try {
+      const success = await service.uploadToRemote(entry);
+      if (success) {
+        vscode.window.showInformationMessage(
+          creating
+            ? `Created ${memberPath} on the IBM i.`
+            : `Successfully uploaded ${memberPath} to IBM i.`
+        );
+      } else {
+        vscode.window.showErrorMessage(
+          `Failed to upload ${memberPath} to IBM i.`
+        );
+      }
+    } catch (err: any) {
+      outputChannel.appendLine(`[upload] Error for ${memberPath}: ${err.message}`);
+      vscode.window.showErrorMessage(
+        `Upload failed: ${err.message}`
+      );
+    }
+    return;
+  }
+
+  const createNote =
+    toCreate.length > 0 ? ` ${toCreate.length} of them will be created as new members.` : "";
+  const confirm = await vscode.window.showWarningMessage(
+    `Upload ${entries.length} local files to the IBM i? This will overwrite the remote members and source dates will not be preserved.${createNote}`,
+    { modal: true, detail: longLineDetail },
+    "Upload All"
+  );
+  if (confirm !== "Upload All") {
+    return;
+  }
+
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: "Uploading to IBM i...", cancellable: true },
+    async (progress, token) => {
+      let succeeded = 0;
+      let errors = 0;
+      let cancelled = false;
+
+      for (let i = 0; i < entries.length; i++) {
+        if (token.isCancellationRequested) {
+          cancelled = true;
+          break;
+        }
+        const entry = entries[i];
+        progress.report({ message: `${entry.memberName} (${i + 1}/${entries.length})` });
+        try {
+          const success = await service.uploadToRemote(entry);
+          if (success) {
+            succeeded++;
+          } else {
+            errors++;
+            outputChannel.appendLine(`[upload] Failed for ${formatMemberPath(entry)}`);
+          }
+        } catch (err: any) {
+          errors++;
+          outputChannel.appendLine(`[upload] Error for ${formatMemberPath(entry)}: ${err.message}`);
+        }
+      }
+
+      if (cancelled) {
+        vscode.window.showInformationMessage(
+          `Upload cancelled. ${succeeded}/${entries.length} member(s) uploaded before cancelling.`
+        );
+      } else if (errors > 0) {
+        vscode.window.showWarningMessage(
+          `Uploaded ${succeeded}/${entries.length} member(s) to IBM i. ${errors} error(s) — see IBM i Checkout output panel.`
+        );
+        outputChannel.show();
+      } else {
+        vscode.window.showInformationMessage(
+          `Successfully uploaded ${succeeded} member(s) to IBM i.`
+        );
+      }
+    }
+  );
+}
+
+async function fileExists(fsPath: string): Promise<boolean> {
+  try {
+    await vscode.workspace.fs.stat(vscode.Uri.file(fsPath));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Offers ways to deal with a checkout whose local file is gone. */
+async function promptMissingLocalFile(service: CheckoutService, entry: CheckedOutMember): Promise<void> {
+  const memberPath = formatMemberPath(entry);
+  // The text may still be open in an editor tab, e.g. after an accidental rename or delete
+  const openDoc = vscode.workspace.textDocuments.find((d) =>
+    isSamePath(d.uri, vscode.Uri.file(entry.localPath))
+  );
+  // An empty baseline means the member was never on the IBM i, so there's nothing to download
+  const canRecheckout = entry.remoteHashAtCheckout !== "";
+
+  const RESTORE = "Restore from Open Editor";
+  const RECHECKOUT = "Re-checkout from IBM i";
+  const REMOVE = "Remove from Checkouts";
+  const choice = await vscode.window.showWarningMessage(
+    `The local file for ${memberPath} is missing.`,
+    {
+      modal: true,
+      detail: `${entry.localPath}\n\nIt may have been renamed, moved or deleted.${
+        openDoc ? " Its contents are still open in an editor and can be saved back." : ""
+      }`,
+    },
+    ...[openDoc ? RESTORE : undefined, canRecheckout ? RECHECKOUT : undefined, REMOVE].filter(
+      (c): c is string => c !== undefined
+    )
+  );
+
+  try {
+    if (choice === RESTORE && openDoc) {
+      const fileUri = vscode.Uri.file(entry.localPath);
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(fileUri, ".."));
+      await vscode.workspace.fs.writeFile(fileUri, Buffer.from(openDoc.getText(), "utf-8"));
+      await vscode.window.showTextDocument(fileUri);
+      const status = await service.refreshRemoteStatus(entry);
+      vscode.window.showInformationMessage(`Restored ${memberPath} (${status}).`);
+    } else if (choice === RECHECKOUT) {
+      await service.recheckout(entry);
+      vscode.window.showInformationMessage(`Re-checked out ${memberPath} from IBM i.`);
+    } else if (choice === REMOVE) {
+      await service.discardEntries([entry]);
+      vscode.window.showInformationMessage(`Removed ${memberPath} from your checkouts.`);
+    }
+  } catch (err: any) {
+    vscode.window.showErrorMessage(`${choice} failed: ${err.message}`);
+  }
+}
+
+/** Finds files in the checkout folder that aren't checked out and lets the user add them. */
+async function scanForNewFiles(service: CheckoutService): Promise<void> {
+  if (!getSystemName()) {
+    vscode.window.showErrorMessage("Not connected to IBM i.");
+    return;
+  }
+
+  const { files, skipped } = await service.findUntrackedFiles();
+
+  for (const { uri, reason } of skipped) {
+    outputChannel.appendLine(`[scan] Skipped ${uri.fsPath}: ${reason}`);
+  }
+  const skippedNote =
+    skipped.length > 0
+      ? ` ${skipped.length} file(s) couldn't be added — see the 'IBM i Checkout' output for details.`
+      : "";
+
+  if (files.length === 0) {
+    if (skipped.length > 0) {
+      outputChannel.show();
+      vscode.window.showWarningMessage(`No new files could be added.${skippedNote}`);
+    } else {
+      vscode.window.showInformationMessage("No new files found in the checkout folder.");
+    }
+    return;
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    files.map((file) => ({
+      label: `${file.memberName}.${file.extension.toUpperCase()}`,
+      description: file.replaces
+        ? `${file.library}/${file.sourceFile} — replaces missing ${file.replaces.localPath}`
+        : `${file.library}/${file.sourceFile}`,
+      detail: file.uri.fsPath,
+      picked: true,
+      file,
+    })),
+    {
+      canPickMany: true,
+      title: "Add New Files to Checkouts",
+      placeHolder: "Select the files to add. They'll be created on the IBM i when you upload them.",
+    }
+  );
+  if (!picked || picked.length === 0) {
+    return;
+  }
+
+  const { added, relinked } = await service.adoptLocalFiles(
+    picked.map((p): UntrackedFile => p.file)
+  );
+  if (skipped.length > 0) {
+    outputChannel.show();
+  }
+
+  const parts = [
+    added.length > 0 ? `Added ${added.length} new member(s) to your checkouts.` : "",
+    relinked.length > 0
+      ? `Re-linked ${relinked.length} checkout(s) whose local file was missing; refresh them to check their status.`
+      : "",
+  ].filter(Boolean);
+  // Re-linked members already exist on the IBM i, so only brand-new ones are offered for creation
+  const newMembers = [...added, ...relinked].filter((e) => service.needsRemoteCreate(e));
+  const choice = await vscode.window.showInformationMessage(
+    `${parts.join(" ")}${skippedNote}`,
+    ...(newMembers.length > 0 ? ["Create on IBM i Now"] : [])
+  );
+  if (choice === "Create on IBM i Now") {
+    await uploadEntries(service, newMembers);
+  }
+}
+
 async function checkoutMembersBatch(
   service: CheckoutService,
   system: string,
-  memberInfoList: { library: string; sourceFile: string; memberName: string; extension: string }[],
+  memberInfoList: { library: string; sourceFile: string; memberName: string; extension: string; text?: string }[],
   outputChannel: vscode.OutputChannel
 ): Promise<void> {
   const alreadyCheckedOut = memberInfoList.filter(
@@ -1248,7 +1594,7 @@ async function checkoutMembersBatch(
         try {
           await service.checkoutMember(
             m.library, m.sourceFile, m.memberName, m.extension,
-            { redownloadBehavior, suppressAutoOpen: true }
+            { redownloadBehavior, suppressAutoOpen: true, memberText: m.text }
           );
           succeeded++;
         } catch (err: any) {
@@ -1325,6 +1671,7 @@ function extractMemberInfo(node: any): {
   sourceFile: string;
   memberName: string;
   extension: string;
+  text?: string;
 } | undefined {
   if (!node) {
     return undefined;
@@ -1335,6 +1682,7 @@ function extractMemberInfo(node: any): {
     sourceFile: string;
     memberName: string;
     extension: string;
+    text?: string;
   } | undefined;
 
   // Pattern 1: resourceUri based (member:// scheme) — most reliable for Code for i
@@ -1430,6 +1778,10 @@ function extractMemberInfo(node: any): {
         `Extracted but has undefined fields: ${JSON.stringify(result)}`
       );
       return undefined;
+    }
+    // Code for i member items carry the member's text; when absent it's looked up at checkout
+    if (typeof node.member?.text === "string") {
+      result.text = node.member.text;
     }
   }
 

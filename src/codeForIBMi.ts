@@ -2,6 +2,10 @@ import * as vscode from "vscode";
 
 export interface IBMiConnection {
   currentHost: string;
+  runCommand(command: {
+    command: string;
+    environment?: "ile" | "qsh" | "pase";
+  }): Promise<{ code: number | null; stdout: string; stderr: string }>;
 }
 
 export interface IBMiMember {
@@ -9,6 +13,7 @@ export interface IBMiMember {
   file: string;
   name: string;
   extension: string;
+  text?: string;
 }
 
 export interface IBMiContent {
@@ -32,7 +37,9 @@ export interface IBMiContent {
   getMemberList(filter: {
     library: string;
     sourceFile: string;
+    members?: string;
   }): Promise<IBMiMember[]>;
+  runSQL(statement: string): Promise<Record<string, unknown>[]>;
 }
 
 export interface IBMiInstance {
@@ -138,4 +145,84 @@ export async function memberExists(
     type: "*FILE",
     member,
   });
+}
+
+export async function sourceFileExists(
+  library: string,
+  sourceFile: string
+): Promise<boolean> {
+  const content = getContent();
+  if (!content) {
+    throw new Error("Not connected to IBM i");
+  }
+  return content.checkObject({ library, name: sourceFile, type: "*FILE" });
+}
+
+/** Looks up a member's text. Returns undefined if it can't be determined. */
+export async function getMemberText(
+  library: string,
+  sourceFile: string,
+  member: string
+): Promise<string | undefined> {
+  const content = getContent();
+  if (!content) {
+    return undefined;
+  }
+  try {
+    const members = await content.getMemberList({ library, sourceFile, members: member });
+    const match = members.find((m) => m.name.toUpperCase() === member.toUpperCase());
+    return match ? (match.text ?? "").trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Creates an empty source member. The source type comes from the file
+ * extension; "mbr" (no real type) leaves it unset.
+ */
+export async function createMember(
+  library: string,
+  sourceFile: string,
+  member: string,
+  extension: string
+): Promise<void> {
+  const connection = getConnection();
+  if (!connection) {
+    throw new Error("Not connected to IBM i");
+  }
+  const srcType =
+    extension && extension.toLowerCase() !== "mbr"
+      ? extension.toUpperCase().substring(0, 10)
+      : "*NONE";
+  const command = `ADDPFM FILE(${library}/${sourceFile}) MBR(${member}) SRCTYPE(${srcType})`;
+  const result = await connection.runCommand({ command, environment: "ile" });
+  if (result.code !== 0) {
+    const message = (result.stderr || result.stdout || "").trim();
+    throw new Error(`${command} failed${message ? `: ${message}` : ""}`);
+  }
+}
+
+/**
+ * Maximum source line length for a source file (record length minus the
+ * 12 bytes of sequence number and date). Undefined if it can't be determined.
+ */
+export async function getSourceLineLength(
+  library: string,
+  sourceFile: string
+): Promise<number | undefined> {
+  const content = getContent();
+  if (!content) {
+    return undefined;
+  }
+  const quote = (value: string) => `'${value.toUpperCase().replace(/'/g, "''")}'`;
+  try {
+    const rows = await content.runSQL(
+      `SELECT ROW_LENGTH FROM QSYS2.SYSTABLES WHERE SYSTEM_TABLE_SCHEMA = ${quote(library)} AND SYSTEM_TABLE_NAME = ${quote(sourceFile)}`
+    );
+    const rowLength = Number(rows[0]?.ROW_LENGTH);
+    return rowLength > 12 ? rowLength - 12 : undefined;
+  } catch {
+    return undefined;
+  }
 }

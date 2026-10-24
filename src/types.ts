@@ -7,6 +7,8 @@ export interface CheckedOutMember {
   sourceFile: string;
   memberName: string;
   extension: string;
+  /** Member text (description) from the IBM i, when known. */
+  memberText?: string;
   localPath: string;
   checkedOutAt: string;
   lastCheckedAt?: string;
@@ -20,7 +22,11 @@ export type CheckoutStatus =
   | "modified"
   | "conflict"
   | "in-sync"
-  | "remote-missing";
+  | "remote-missing"
+  /** Created locally (e.g. by a tool or AI) and not yet on the IBM i. */
+  | "local-only"
+  /** The local file is gone (deleted, renamed or moved outside the extension). */
+  | "local-missing";
 
 export interface CheckoutIndex {
   version: number;
@@ -32,7 +38,26 @@ export interface RefreshTally {
   modified: number;
   conflict: number;
   missing: number;
+  localOnly: number;
+  localMissing: number;
   errors: number;
+}
+
+/** A file in the checkout folder that isn't in the checkout index. */
+export interface UntrackedFile {
+  uri: vscode.Uri;
+  library: string;
+  sourceFile: string;
+  memberName: string;
+  extension: string;
+  /** A checkout of the same member whose local file is missing; adopting re-links it. */
+  replaces?: CheckedOutMember;
+}
+
+export interface UntrackedScanResult {
+  files: UntrackedFile[];
+  /** Files that look like members but can't be adopted, with the reason. */
+  skipped: { uri: vscode.Uri; reason: string }[];
 }
 
 export interface RelocateResult {

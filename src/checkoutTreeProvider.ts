@@ -234,12 +234,21 @@ export class CheckoutTreeProvider
         return `in sync ${checkedDate}`;
       case "remote-missing":
         return `remote member does not exist (checked ${checkedDate})`;
+      case "local-only":
+        return "new — not on the IBM i yet";
+      case "local-missing":
+        return `local file missing (checked ${checkedDate})`;
     }
   }
 
   private getTooltip(entry: CheckedOutMember): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.appendMarkdown(`**${formatMemberPath(entry)}**\n\n`);
+    if (entry.memberText) {
+      md.appendMarkdown(`- **Text:** `);
+      md.appendText(entry.memberText);
+      md.appendMarkdown(`\n`);
+    }
     md.appendMarkdown(`- **System:** ${entry.system}\n`);
     md.appendMarkdown(`- **Status:** ${entry.status}\n`);
     if (entry.status === "remote-missing") {
@@ -247,8 +256,18 @@ export class CheckoutTreeProvider
         `- **Warning:** the member no longer exists on the IBM i. Your local copy is the only one left.\n`
       );
     }
+    if (entry.status === "local-missing") {
+      md.appendMarkdown(
+        `- **Warning:** the local file is missing. It may have been renamed, moved or deleted. Open it for options to restore or remove it.\n`
+      );
+    }
+    if (entry.status === "local-only") {
+      md.appendMarkdown(
+        `- **New:** this file was created locally. Use **Create on IBM i** to add the member.\n`
+      );
+    }
     md.appendMarkdown(
-      `- **Checked out:** ${new Date(entry.checkedOutAt).toLocaleString()}\n`
+      `- **${entry.status === "local-only" ? "Added" : "Checked out"}:** ${new Date(entry.checkedOutAt).toLocaleString()}\n`
     );
     if (entry.lastCheckedAt) {
       md.appendMarkdown(
@@ -289,6 +308,16 @@ export class CheckoutTreeProvider
       case "remote-missing":
         return new vscode.ThemeIcon(
           "error",
+          new vscode.ThemeColor("errorForeground")
+        );
+      case "local-only":
+        return new vscode.ThemeIcon(
+          "diff-added",
+          new vscode.ThemeColor("charts.blue")
+        );
+      case "local-missing":
+        return new vscode.ThemeIcon(
+          "circle-slash",
           new vscode.ThemeColor("errorForeground")
         );
     }

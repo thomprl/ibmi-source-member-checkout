@@ -2,7 +2,7 @@
   "name": "ibmi-source-member-checkout",
   "displayName": "IBMi Source Member Checkout",
   "description": "Check out, track, and merge IBM i source members with a safe diff-based workflow. Works with Code for IBM i.",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "RickyThompson",
   "license": "GPL-3.0",
   "icon": "images/icon.png",
@@ -203,6 +203,18 @@
         "title": "Move Checkout Folder...",
         "category": "IBM i Checkout",
         "icon": "$(folder-opened)"
+      },
+      {
+        "command": "ibmi-checkout.scanForNewFiles",
+        "title": "Scan for New Local Files...",
+        "category": "IBM i Checkout",
+        "icon": "$(search)"
+      },
+      {
+        "command": "ibmi-checkout.createOnRemote",
+        "title": "Create on IBM i",
+        "category": "IBM i Checkout",
+        "icon": "$(cloud-upload)"
       }
     ],
     "menus": {
@@ -231,7 +243,9 @@
         { "command": "ibmi-checkout.refreshSourceFileRemote", "when": "false" },
         { "command": "ibmi-checkout.expandAll", "when": "false" },
         { "command": "ibmi-checkout.search", "when": "false" },
-        { "command": "ibmi-checkout.clearSearch", "when": "false" }
+        { "command": "ibmi-checkout.clearSearch", "when": "false" },
+        { "command": "ibmi-checkout.createOnRemote", "when": "false" },
+        { "command": "ibmi-checkout.scanForNewFiles", "when": "code-for-ibmi:connected" }
       ],
       "view/item/context": [
         {
@@ -251,7 +265,7 @@
         },
         {
           "command": "ibmi-checkout.mergeBack",
-          "when": "view == checkoutView && viewItem =~ /^checkout/ && !listMultiSelection",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only && viewItem != checkout-local-missing && !listMultiSelection",
           "group": "inline@2"
         },
         {
@@ -261,42 +275,52 @@
         },
         {
           "command": "ibmi-checkout.openRemoteFile",
-          "when": "view == checkoutView && viewItem =~ /^checkout/",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only",
           "group": "1_open@2"
         },
         {
           "command": "ibmi-checkout.revealInExplorer",
-          "when": "view == checkoutView && viewItem =~ /^checkout/ && !listMultiSelection",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-missing && !listMultiSelection",
           "group": "1_open@3"
         },
         {
           "command": "ibmi-checkout.mergeBack",
-          "when": "view == checkoutView && viewItem =~ /^checkout/ && !listMultiSelection",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only && viewItem != checkout-local-missing && !listMultiSelection",
           "group": "2_merge@1"
         },
         {
           "command": "ibmi-checkout.uploadToRemote",
-          "when": "view == checkoutView && viewItem =~ /^checkout/",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only && viewItem != checkout-local-missing && viewItem != checkout-remote-missing",
           "group": "2_merge@2"
         },
         {
+          "command": "ibmi-checkout.createOnRemote",
+          "when": "view == checkoutView && (viewItem == checkout-local-only || viewItem == checkout-remote-missing)",
+          "group": "2_merge@2"
+        },
+        {
+          "command": "ibmi-checkout.createOnRemote",
+          "when": "view == checkoutView && viewItem == checkout-local-only",
+          "group": "inline@2"
+        },
+        {
           "command": "ibmi-checkout.recheckout",
-          "when": "view == checkoutView && viewItem =~ /^checkout/",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only",
           "group": "2_merge@3"
         },
         {
           "command": "ibmi-checkout.runAction",
-          "when": "view == checkoutView && viewItem =~ /^checkout/",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-missing",
           "group": "2_merge@4"
         },
         {
           "command": "ibmi-checkout.selectForCompare",
-          "when": "view == checkoutView && viewItem =~ /^checkout/ && !listMultiSelection",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only && viewItem != checkout-local-missing && !listMultiSelection",
           "group": "3_compare@1"
         },
         {
           "submenu": "ibmi-checkout.compareWith",
-          "when": "view == checkoutView && viewItem =~ /^checkout/ && !listMultiSelection",
+          "when": "view == checkoutView && viewItem =~ /^checkout/ && viewItem != checkout-local-only && viewItem != checkout-local-missing && !listMultiSelection",
           "group": "3_compare@2"
         },
         {
@@ -385,6 +409,11 @@
           "group": "navigation@4"
         },
         {
+          "command": "ibmi-checkout.scanForNewFiles",
+          "when": "view == checkoutView",
+          "group": "8_scan@1"
+        },
+        {
           "command": "ibmi-checkout.moveCheckoutFolder",
           "when": "view == checkoutView",
           "group": "9_folder@1"
@@ -413,6 +442,11 @@
           "type": "boolean",
           "default": false,
           "description": "Allow checking out source members from protected (read-only) filters. Off by default to prevent accidental edits to protected sources."
+        },
+        "ibmi-checkout.watchForNewFiles": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Watch the checkout folder for new files created outside the extension (for example by an AI assistant) and offer to add them to your checkouts. Off by default, since it prompts each time new files appear. You can always run **IBM i Checkout: Scan for New Local Files...** by hand."
         }
       }
     }
